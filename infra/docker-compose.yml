@@ -17,10 +17,13 @@ services:
       DATABASE_URL: postgresql://clipsync:clipsync@postgres:5432/clipsync
       JWT_SECRET: change-me
       PORT: 5000
+      BLOB_STORAGE_PATH: /data/blobs
     ports:
       - "5000:5000"
     depends_on:
       - postgres
+    volumes:
+      - blobs:/data/blobs
   client:
     build:
       context: ..
@@ -31,3 +34,4 @@ services:
       - server
 volumes:
   pgdata:
+  blobs:

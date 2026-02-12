@@ -1,4 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
+import { useLocation } from "wouter";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import { SettingsPage } from "@/components/settings-page";
 import { 
@@ -82,6 +84,7 @@ import {
 } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { apiJson } from "@/lib/api";
 
 interface StructuredField {
   id: string;
@@ -103,6 +106,21 @@ interface ClipItem {
   deleted: boolean;
   isStructured: boolean;
   fields: StructuredField[];
+}
+
+interface ClipRecord {
+  id: string;
+  contentType: string;
+  textContent: string | null;
+  tags: string[];
+  folderId: string | null;
+  isPinned: boolean;
+  isStarred: boolean;
+  isDeleted: boolean;
+  hotkeySlot: number | null;
+  source: string;
+  createdAt: string | Date;
+  updatedAt: string | Date;
 }
 
 interface HotkeyConfig {
@@ -288,11 +306,41 @@ function formatDate(date: Date): string {
   });
 }
 
+function inferCategory(clip: ClipRecord): ClipItem["category"] {
+  const tagSet = new Set((clip.tags ?? []).map((tag) => tag.toLowerCase()));
+  if (tagSet.has("prompt") || tagSet.has("ai") || clip.source === "ai_generated") return "prompts";
+  if (tagSet.has("snippet") || tagSet.has("code")) return "snippets";
+  if (clip.textContent && clip.textContent.includes("\n")) return "notes";
+  return "clipboard";
+}
+
+function mapClipRecord(clip: ClipRecord): ClipItem {
+  const content = clip.textContent ?? "";
+  const lines = content.split("\n");
+  const title = lines[0]?.trim() || "Untitled Clip";
+  const body = lines.length > 1 ? lines.slice(1).join("\n") : content;
+  return {
+    id: clip.id,
+    title,
+    content: body,
+    timestamp: new Date(clip.createdAt),
+    pinned: clip.isPinned,
+    starred: clip.isStarred,
+    category: inferCategory(clip),
+    tags: clip.tags ?? [],
+    deleted: clip.isDeleted,
+    isStructured: false,
+    fields: []
+  };
+}
+
 export default function ClipboardPage() {
+  const queryClient = useQueryClient();
+  const [location, setLocation] = useLocation();
   const [clips, setClips] = useState<ClipItem[]>(initialClips);
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<SidebarCategory>("all");
-  const [selectedClip, setSelectedClip] = useState<ClipItem | null>(null);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
   const [editingTitle, setEditingTitle] = useState("");
   const [editingFields, setEditingFields] = useState<StructuredField[]>([]);
@@ -316,6 +364,64 @@ export default function ClipboardPage() {
   const [newFieldType, setNewFieldType] = useState<StructuredField["type"]>("text");
   const inputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
+
+  const clipsQuery = useQuery({
+    queryKey: ["/api/clips", { limit: 200, deleted: "all" }],
+  });
+
+  useEffect(() => {
+    if (clipsQuery.data?.clips) {
+      setClips((clipsQuery.data.clips as ClipRecord[]).map(mapClipRecord));
+    }
+  }, [clipsQuery.data]);
+
+  const selectedClip = useMemo(
+    () => clips.find((clip) => clip.id === selectedClipId) ?? null,
+    [clips, selectedClipId]
+  );
+
+  const createClipMutation = useMutation({
+    mutationFn: (payload: Record<string, unknown>) =>
+      apiJson<ClipRecord>("/api/clips", { method: "POST", body: JSON.stringify(payload) }),
+    onSuccess: (data) => {
+      const mapped = mapClipRecord(data);
+      setClips((prev) => [mapped, ...prev]);
+      setSelectedClipId(mapped.id);
+      queryClient.invalidateQueries({ queryKey: ["/api/clips"] });
+    }
+  });
+
+  const updateClipMutation = useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: Record<string, unknown> }) =>
+      apiJson<ClipRecord>(`/api/clips/${id}`, { method: "PUT", body: JSON.stringify(patch) }),
+    onSuccess: (data) => {
+      const mapped = mapClipRecord(data);
+      setClips((prev) => prev.map((clip) => (clip.id === mapped.id ? mapped : clip)));
+      queryClient.invalidateQueries({ queryKey: ["/api/clips"] });
+    }
+  });
+
+  const deleteClipMutation = useMutation({
+    mutationFn: ({ id, hard }: { id: string; hard?: boolean }) =>
+      apiJson(`/api/clips/${id}${hard ? "?hard=true" : ""}`, { method: "DELETE" }),
+    onSuccess: (_data, variables) => {
+      if (variables.hard) {
+        setClips((prev) => prev.filter((clip) => clip.id !== variables.id));
+      } else {
+        setClips((prev) => prev.map((clip) => (clip.id === variables.id ? { ...clip, deleted: true } : clip)));
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/clips"] });
+    }
+  });
+
+  const copyClipMutation = useMutation({
+    mutationFn: (id: string) => apiJson(`/api/clips/${id}/copy`, { method: "POST" })
+  });
+
+  const aiMutation = useMutation({
+    mutationFn: ({ endpoint, payload }: { endpoint: string; payload: Record<string, unknown> }) =>
+      apiJson(endpoint, { method: "POST", body: JSON.stringify(payload) })
+  });
 
   const allTags = Array.from(new Set(clips.flatMap(c => c.tags))).filter(Boolean);
 
@@ -373,13 +479,14 @@ export default function ClipboardPage() {
   }, [aiPrompt]);
 
   const handleCopy = async (clip: ClipItem) => {
-    let textToCopy = clip.content;
+    let textToCopy = clip.content.trim().length ? `${clip.title}\n${clip.content}` : clip.title;
     if (clip.isStructured && clip.fields.length > 0) {
       textToCopy = clip.fields.map(f => `${f.label}: ${f.value}`).join("\n");
     }
     try {
       await navigator.clipboard.writeText(textToCopy);
       setCopiedId(clip.id);
+      copyClipMutation.mutate(clip.id);
       toast({ title: "Copied" });
       setTimeout(() => setCopiedId(null), 2000);
     } catch (err) {
@@ -387,71 +494,61 @@ export default function ClipboardPage() {
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!selectedClip) return;
-    setClips(clips.map(clip => 
-      clip.id === selectedClip.id 
-        ? { ...clip, content: editingContent, title: editingTitle, fields: editingFields, timestamp: new Date() }
-        : clip
-    ));
-    setSelectedClip({ ...selectedClip, content: editingContent, title: editingTitle, fields: editingFields });
+    const title = editingTitle.trim();
+    const body = editingContent;
+    const nextContent = title && body.trim().length ? `${title}\n${body}` : title || body;
+    await updateClipMutation.mutateAsync({
+      id: selectedClip.id,
+      patch: { text_content: nextContent }
+    });
+    setEditingContent(body);
+    setEditingTitle(title || nextContent.split("\n")[0]?.trim() || editingTitle);
     toast({ title: "Saved" });
   };
 
-  const handleDelete = (id: string) => {
-    setClips(clips.map(clip => 
-      clip.id === id ? { ...clip, deleted: true } : clip
-    ));
-    if (selectedClip?.id === id) setSelectedClip(null);
+  const handleDelete = async (id: string) => {
+    await deleteClipMutation.mutateAsync({ id });
+    if (selectedClipId === id) setSelectedClipId(null);
     toast({ title: "Moved to Recycle Bin" });
   };
 
-  const handleRestore = (id: string) => {
-    setClips(clips.map(clip => 
-      clip.id === id ? { ...clip, deleted: false } : clip
-    ));
+  const handleRestore = async (id: string) => {
+    await updateClipMutation.mutateAsync({ id, patch: { is_deleted: false } });
     toast({ title: "Restored" });
   };
 
-  const handlePermanentDelete = (id: string) => {
-    setClips(clips.filter(clip => clip.id !== id));
-    if (selectedClip?.id === id) setSelectedClip(null);
+  const handlePermanentDelete = async (id: string) => {
+    await deleteClipMutation.mutateAsync({ id, hard: true });
+    if (selectedClipId === id) setSelectedClipId(null);
     toast({ title: "Permanently deleted" });
   };
 
-  const handleStar = (id: string) => {
-    setClips(clips.map(clip => 
-      clip.id === id ? { ...clip, starred: !clip.starred } : clip
-    ));
+  const handleStar = async (id: string) => {
+    const clip = clips.find((c) => c.id === id);
+    if (!clip) return;
+    await updateClipMutation.mutateAsync({ id, patch: { is_starred: !clip.starred } });
   };
 
-  const handlePin = (id: string) => {
-    setClips(clips.map(clip => 
-      clip.id === id ? { ...clip, pinned: !clip.pinned } : clip
-    ));
+  const handlePin = async (id: string) => {
+    const clip = clips.find((c) => c.id === id);
+    if (!clip) return;
+    await updateClipMutation.mutateAsync({ id, patch: { is_pinned: !clip.pinned } });
   };
 
   const handleNewNote = (category: ClipItem["category"] = "notes", isStructured = false) => {
-    const newClip: ClipItem = {
-      id: Date.now().toString(),
-      title: category === "prompts" ? "New Prompt" : isStructured ? "New Structured Note" : "Untitled Note",
-      content: "",
-      timestamp: new Date(),
-      pinned: false,
-      starred: false,
-      category,
-      tags: [],
-      deleted: false,
-      isStructured,
-      fields: isStructured ? [
-        { id: "f1", label: "Field 1", value: "", type: "text", icon: "text" }
-      ] : []
-    };
-    setClips([newClip, ...clips]);
-    setSelectedClip(newClip);
-    setEditingTitle(newClip.title);
+    const title = category === "prompts" ? "New Prompt" : isStructured ? "New Structured Note" : "Untitled Note";
+    const tags = category === "prompts" ? ["prompt"] : category === "snippets" ? ["snippet"] : [];
+    createClipMutation.mutate({
+      content_type: "text/plain",
+      text_content: title,
+      tags,
+      source: "manual"
+    });
+    setEditingTitle(title);
     setEditingContent("");
-    setEditingFields(newClip.fields);
+    setEditingFields(isStructured ? [{ id: "f1", label: "Field 1", value: "", type: "text", icon: "text" }] : []);
     setShowAIChat(false);
   };
 
@@ -474,86 +571,101 @@ export default function ClipboardPage() {
     setEditingFields(editingFields.filter(f => f.id !== fieldId));
   };
 
+  const handleAddTag = async () => {
+    if (!selectedClip) return;
+    const tag = window.prompt("Add tag");
+    if (!tag) return;
+    const nextTags = Array.from(new Set([...selectedClip.tags, tag.trim()])).filter(Boolean);
+    await updateClipMutation.mutateAsync({ id: selectedClip.id, patch: { tags: nextTags } });
+  };
+
   const handleUpdateField = (fieldId: string, value: string) => {
     setEditingFields(editingFields.map(f => 
       f.id === fieldId ? { ...f, value } : f
     ));
   };
 
-  const handleSelectWorkflow = (workflow: AIWorkflow) => {
+  const handleSelectWorkflow = async (workflow: AIWorkflow) => {
     setAiPrompt("");
     setShowWorkflowMenu(false);
-    
-    const context = selectedClip ? `\n\nContext from "${selectedClip.title}":\n${selectedClip.content}` : "";
-    const fullPrompt = workflow.prompt + context;
-    
-    setAiMessages([...aiMessages, { role: "user", content: `${workflow.command} - ${workflow.name}` }]);
-    setAiLoading(true);
-    
-    setTimeout(() => {
-      let response = "";
-      switch (workflow.id) {
-        case "w1":
-          response = selectedClip 
-            ? `Here's a summary of "${selectedClip.title}":\n\n• Key points extracted from your note\n• Main action items identified\n• Core concepts highlighted for quick reference`
-            : "Please select a note first, then I can summarize it for you.";
-          break;
-        case "w2":
-          response = "I've analyzed the text. Here are my suggestions:\n\n1. Consider breaking long sentences into shorter ones\n2. Use more active voice\n3. Add transition words between paragraphs\n\nWould you like me to rewrite it?";
-          break;
-        case "w3":
-          response = "Based on the content, I suggest these tags:\n\n#documentation #reference #important\n\nWould you like me to apply them?";
-          break;
-        case "w4":
-          response = "Code review complete:\n\n✅ Syntax looks good\n⚠️ Consider adding error handling\n💡 Variable naming could be more descriptive\n\nWant me to suggest specific improvements?";
-          break;
-        case "w5":
-          response = "I can help draft an email. Please provide:\n\n1. Who is the recipient?\n2. What's the main purpose?\n3. What tone? (formal/casual)\n\nOr just describe what you need!";
-          break;
-        case "w6":
-          response = "Here are some ideas to brainstorm:\n\n💡 Expand on the core concept\n💡 Consider alternative approaches\n💡 Look for connections to other projects\n💡 What problems does this solve?\n\nWhat direction interests you most?";
-          break;
-        default:
-          response = "Workflow executed. How can I help you further?";
-      }
-      setAiMessages(prev => [...prev, { role: "assistant", content: response }]);
-      setAiLoading(false);
-    }, 1200);
-  };
 
-  const handleAISubmit = () => {
-    if (!aiPrompt.trim()) return;
-    
-    if (showWorkflowMenu && filteredWorkflows.length > 0) {
-      handleSelectWorkflow(filteredWorkflows[0]);
+    setAiMessages((prev) => [...prev, { role: "user", content: `${workflow.command} - ${workflow.name}` }]);
+    setAiLoading(true);
+
+    if (!selectedClip) {
+      setAiMessages((prev) => [...prev, { role: "assistant", content: "Please select a note first, then I can run this workflow." }]);
+      setAiLoading(false);
       return;
     }
-    
+
+    try {
+      let endpoint = "/api/ai/workflow";
+      let payload: Record<string, unknown> = { clip_id: selectedClip.id, workflow: "ideas" };
+
+      if (workflow.id === "w1") {
+        endpoint = "/api/ai/summarize";
+        payload = { clip_id: selectedClip.id };
+      } else if (workflow.id === "w2") {
+        endpoint = "/api/ai/improve";
+        payload = { clip_id: selectedClip.id };
+      } else if (workflow.id === "w3") {
+        endpoint = "/api/ai/classify";
+        payload = { clip_id: selectedClip.id };
+      } else if (workflow.id === "w4") {
+        payload = { clip_id: selectedClip.id, workflow: "code" };
+      } else if (workflow.id === "w5") {
+        payload = { clip_id: selectedClip.id, workflow: "email" };
+      } else if (workflow.id === "w6") {
+        payload = { clip_id: selectedClip.id, workflow: "ideas" };
+      }
+
+      const response = (await aiMutation.mutateAsync({ endpoint, payload })) as any;
+
+      let reply = "Workflow complete.";
+      if (workflow.id === "w3" && response?.tags) {
+        reply = `Suggested tags: ${(response.tags as string[]).map((t) => `#${t}`).join(" ")}`;
+      } else if (response?.output) {
+        reply = response.output as string;
+      } else if (response?.reply) {
+        reply = response.reply as string;
+      }
+
+      setAiMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+
+      if (workflow.id === "w1" && response?.clip) {
+        setClips((prev) => [mapClipRecord(response.clip as ClipRecord), ...prev]);
+      }
+    } catch (error) {
+      toast({ title: "AI request failed", variant: "destructive" });
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleAISubmit = async () => {
+    if (!aiPrompt.trim()) return;
+
+    if (showWorkflowMenu && filteredWorkflows.length > 0) {
+      await handleSelectWorkflow(filteredWorkflows[0]);
+      return;
+    }
+
     const userMessage = aiPrompt;
-    setAiMessages([...aiMessages, { role: "user", content: userMessage }]);
+    setAiMessages((prev) => [...prev, { role: "user", content: userMessage }]);
     setAiPrompt("");
     setAiLoading(true);
 
-    setTimeout(() => {
-      let response = "";
-      const lowerMsg = userMessage.toLowerCase();
-      
-      if (lowerMsg.includes("list") && (lowerMsg.includes("note") || lowerMsg.includes("clip"))) {
-        const noteList = clips.filter(c => !c.deleted).slice(0, 5).map(c => `• ${c.title}`).join("\n");
-        response = `Here are your recent items:\n\n${noteList}\n\nWould you like me to do something with any of these?`;
-      } else if (lowerMsg.includes("find") || lowerMsg.includes("search")) {
-        response = `I can search through your ${clips.filter(c => !c.deleted).length} items. What are you looking for specifically?`;
-      } else if (lowerMsg.includes("help")) {
-        response = "I can help you with:\n\n• /summarize - Summarize notes\n• /improve - Improve writing\n• /tags - Suggest tags\n• /code - Code review\n• /email - Draft emails\n• /ideas - Brainstorm\n\nOr just ask me anything about your notes!";
-      } else if (selectedClip) {
-        response = `I see you have "${selectedClip.title}" selected. I can help you:\n\n• Summarize it\n• Improve the writing\n• Suggest tags\n• Find related items\n\nWhat would you like me to do?`;
-      } else {
-        response = "I'm ready to help! You can:\n\n• Select a note and ask me to work with it\n• Use /commands for quick workflows\n• Ask me to find or organize your content\n\nWhat would you like to do?";
-      }
-      
-      setAiMessages(prev => [...prev, { role: "assistant", content: response }]);
+    try {
+      const response = (await aiMutation.mutateAsync({
+        endpoint: "/api/ai/chat",
+        payload: { message: userMessage, clip_id: selectedClip?.id }
+      })) as any;
+      setAiMessages((prev) => [...prev, { role: "assistant", content: (response?.reply as string) ?? "Done." }]);
+    } catch (error) {
+      toast({ title: "AI request failed", variant: "destructive" });
+    } finally {
       setAiLoading(false);
-    }, 1000);
+    }
   };
 
   const getCategoryCount = (cat: SidebarCategory): number => {
@@ -582,6 +694,14 @@ export default function ClipboardPage() {
     { id: "prompts", icon: MessageSquare, label: "Prompts" },
   ];
 
+  const workspaceNav: { label: string; icon: typeof FileText; path: string }[] = [
+    { label: "Clipboard", icon: Clipboard, path: "/" },
+    { label: "Predictions", icon: Sparkles, path: "/predictions" },
+    { label: "Rules", icon: Zap, path: "/rules" },
+    { label: "Folders", icon: Archive, path: "/folders" },
+    { label: "Settings", icon: Settings, path: "/settings" },
+  ];
+
   const getFieldIcon = (type: StructuredField["type"]) => {
     const Icon = fieldIcons[type] || FileText;
     return <Icon className="w-4 h-4 text-muted-foreground" />;
@@ -605,7 +725,7 @@ export default function ClipboardPage() {
           <Button 
             onClick={() => {
               setShowAIChat(true);
-              setSelectedClip(null);
+              setSelectedClipId(null);
             }}
             variant={showAIChat ? "default" : "outline"}
             className={cn(
@@ -618,6 +738,26 @@ export default function ClipboardPage() {
             <Bot className="w-4 h-4" />
             AI Assistant
           </Button>
+        </div>
+
+        <Separator className="mx-2" />
+
+        <div className="p-2 space-y-1">
+          {workspaceNav.map((item) => (
+            <button
+              key={item.label}
+              onClick={() => setLocation(item.path)}
+              className={cn(
+                "w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors",
+                location === item.path
+                  ? "bg-primary/10 text-primary"
+                  : "text-muted-foreground hover:bg-muted/50"
+              )}
+            >
+              <item.icon className="w-4 h-4" />
+              {item.label}
+            </button>
+          ))}
         </div>
 
         <Separator className="mx-2" />
@@ -793,6 +933,19 @@ export default function ClipboardPage() {
 
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-1">
+            {clipsQuery.isError && (
+              <div className="py-6 text-center">
+                <p className="text-sm text-destructive">Failed to load clips. Check API connection in settings.</p>
+              </div>
+            )}
+
+            {clipsQuery.isLoading && filteredClips.length === 0 && (
+              <div className="py-12 text-center">
+                <Loader2 className="w-5 h-5 mx-auto mb-2 animate-spin text-muted-foreground" />
+                <p className="text-sm text-muted-foreground">Loading clips...</p>
+              </div>
+            )}
+
             {filteredClips.map((clip) => (
               <motion.div
                 key={clip.id}
@@ -805,7 +958,7 @@ export default function ClipboardPage() {
                     : "hover:bg-muted/50 border border-transparent"
                 )}
                 onClick={() => {
-                  setSelectedClip(clip);
+                  setSelectedClipId(clip.id);
                   setShowAIChat(false);
                 }}
                 data-testid={`clip-item-${clip.id}`}
@@ -1050,7 +1203,7 @@ export default function ClipboardPage() {
                   {tag}
                 </Badge>
               ))}
-              <Button variant="ghost" size="sm" className="h-6 text-xs">
+              <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={handleAddTag}>
                 <Plus className="w-3 h-3 mr-1" />
                 Add tag
               </Button>

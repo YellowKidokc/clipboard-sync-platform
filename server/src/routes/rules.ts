@@ -3,7 +3,7 @@ import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { rules } from "../db/schema.js";
-import { applyRules } from "../engine/rule-engine.js";
+import { applyRule } from "../engine/rule-engine.js";
 import type { AuthedRequest } from "../middleware/auth.js";
 
 const router = Router();
@@ -29,8 +29,29 @@ router.delete("/:id", async (req: AuthedRequest, res) => {
 });
 router.post("/test", async (req: AuthedRequest, res) => {
   const body = z.object({ rule: ruleSchema, test_content: z.string(), content_type: z.string().default("text/plain") }).parse(req.body);
-  const result = await applyRules({ userId: req.userId!, contentType: body.content_type, textContent: body.test_content, tags: [] });
-  res.json({ matched: result.textContent !== body.test_content || (result.tags?.length ?? 0) > 0, result });
+  const rule = {
+    id: crypto.randomUUID(),
+    userId: req.userId!,
+    name: body.rule.name,
+    matchType: body.rule.match_type,
+    pattern: body.rule.pattern,
+    action: body.rule.action,
+    params: body.rule.params,
+    priority: body.rule.priority,
+    enabled: body.rule.enabled
+  };
+  const result = await applyRule(rule, {
+    userId: req.userId!,
+    contentType: body.content_type,
+    textContent: body.test_content,
+    tags: []
+  });
+  const matched =
+    result.ruleActions.length > 0 ||
+    result.textContent !== body.test_content ||
+    (result.tags?.length ?? 0) > 0 ||
+    Boolean(result.folderId);
+  res.json({ matched, result });
 });
 
 export default router;

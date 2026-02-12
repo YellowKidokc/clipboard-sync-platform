@@ -1,10 +1,14 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
+import { apiFetch, buildApiUrl } from "./api";
 
-async function throwIfResNotOk(res: Response) {
-  if (!res.ok) {
-    const text = (await res.text()) || res.statusText;
-    throw new Error(`${res.status}: ${text}`);
-  }
+function buildUrl(path: string, params?: Record<string, unknown>): string {
+  if (!params || Object.keys(params).length === 0) return buildApiUrl(path);
+  const url = new URL(buildApiUrl(path), window.location.origin);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    url.searchParams.set(key, String(value));
+  });
+  return url.toString();
 }
 
 export async function apiRequest(
@@ -12,15 +16,10 @@ export async function apiRequest(
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
-  const res = await fetch(url, {
+  return apiFetch(url, {
     method,
-    headers: data ? { "Content-Type": "application/json" } : {},
     body: data ? JSON.stringify(data) : undefined,
-    credentials: "include",
   });
-
-  await throwIfResNotOk(res);
-  return res;
 }
 
 type UnauthorizedBehavior = "returnNull" | "throw";
@@ -29,16 +28,16 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(queryKey.join("/") as string, {
-      credentials: "include",
-    });
-
-    if (unauthorizedBehavior === "returnNull" && res.status === 401) {
-      return null;
+    const [path, params] = queryKey as [string, Record<string, unknown> | undefined];
+    try {
+      const res = await apiFetch(buildUrl(path, params));
+      return (await res.json()) as T;
+    } catch (error) {
+      if (unauthorizedBehavior === "returnNull" && String(error).includes("401")) {
+        return null;
+      }
+      throw error;
     }
-
-    await throwIfResNotOk(res);
-    return await res.json();
   };
 
 export const queryClient = new QueryClient({

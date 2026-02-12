@@ -1,4 +1,4 @@
-import { boolean, integer, jsonb, pgTable, real, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, pgTable, real, text, timestamp, uuid, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -10,7 +10,7 @@ export const users = pgTable("users", {
 
 export const devices = pgTable("devices", {
   id: uuid("id").primaryKey().defaultRandom(),
-  userId: uuid("user_id").notNull().unique().references(() => users.id),
+  userId: uuid("user_id").notNull().references(() => users.id),
   name: text("name").notNull(),
   platform: text("platform").notNull()
 });
@@ -63,15 +63,21 @@ export const predictions = pgTable("predictions", {
   createdAt: timestamp("created_at").defaultNow().notNull()
 });
 
-export const predictionStats = pgTable("prediction_stats", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  userId: uuid("user_id").notNull().references(() => users.id),
-  windowSize: integer("window_size").notNull().default(100),
-  accuracy: real("accuracy").notNull().default(0),
-  totalPredictions: integer("total_predictions").notNull().default(0),
-  correctPredictions: integer("correct_predictions").notNull().default(0),
-  updatedAt: timestamp("updated_at").defaultNow().notNull()
-});
+export const predictionStats = pgTable(
+  "prediction_stats",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull().references(() => users.id),
+    windowSize: integer("window_size").notNull().default(100),
+    accuracy: real("accuracy").notNull().default(0),
+    totalPredictions: integer("total_predictions").notNull().default(0),
+    correctPredictions: integer("correct_predictions").notNull().default(0),
+    updatedAt: timestamp("updated_at").defaultNow().notNull()
+  },
+  (table) => ({
+    userIdIdx: uniqueIndex("prediction_stats_user_id_idx").on(table.userId)
+  })
+);
 
 export const aiConversations = pgTable("ai_conversations", {
   id: uuid("id").primaryKey().defaultRandom(),
