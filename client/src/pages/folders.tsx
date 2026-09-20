@@ -29,10 +29,10 @@ export default function FoldersPage() {
   const [selected, setSelected] = useState<FolderRecord | null>(null);
   const [editing, setEditing] = useState<FolderRecord | null>(null);
 
-  const foldersQuery = useQuery({ queryKey: ["/api/folders"] });
+  const foldersQuery = useQuery<{ folders: FolderRecord[] }>({ queryKey: ["/api/folders"] });
   const folders = useMemo(() => (foldersQuery.data?.folders as FolderRecord[]) ?? [], [foldersQuery.data]);
 
-  const clipsQuery = useQuery({
+  const clipsQuery = useQuery<{ clips: ClipRecord[] }>({
     queryKey: selected ? [`/api/folders/${selected.id}/clips`] : ["/api/folders"],
     enabled: !!selected
   });

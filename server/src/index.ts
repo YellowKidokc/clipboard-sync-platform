@@ -14,6 +14,7 @@ import { requireAuth, type AuthedRequest } from "./middleware/auth.js";
 import { db } from "./db/client.js";
 import { devices, users } from "./db/schema.js";
 import { eq } from "drizzle-orm";
+import { asyncHandler } from "./middleware/async-handler.js";
 
 const app = express();
 app.use(cors());
@@ -22,11 +23,11 @@ app.use(express.json({ limit: "10mb" }));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.use("/api/auth", authRoutes);
 
-app.get("/api/me", requireAuth, async (req: AuthedRequest, res) => {
+app.get("/api/me", requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   const [user] = await db.select({ id: users.id, email: users.email }).from(users).where(eq(users.id, req.userId!)).limit(1);
   const rows = await db.select().from(devices).where(eq(devices.userId, req.userId!));
   res.json({ user, devices: rows });
-});
+}));
 
 app.use("/api/clips", requireAuth, clipsRoutes);
 app.use("/api/rules", requireAuth, rulesRoutes);

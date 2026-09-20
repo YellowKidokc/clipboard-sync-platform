@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { clips, folders, predictions, predictionStats } from "../db/schema.js";
 import { aiJsonPrediction } from "../services/ai-service.js";
@@ -24,7 +24,7 @@ export async function generatePrediction(userId: string): Promise<{ prediction: 
   const recentPredictions = await db
     .select()
     .from(predictions)
-    .where(eq(predictions.userId, userId))
+    .where(and(eq(predictions.userId, userId), isNotNull(predictions.wasCorrect)))
     .orderBy(desc(predictions.createdAt))
     .limit(8);
 
@@ -83,7 +83,7 @@ export async function resolveLatestPrediction(userId: string, actualContent: str
   const recent = await db
     .select()
     .from(predictions)
-    .where(eq(predictions.userId, userId))
+    .where(and(eq(predictions.userId, userId), isNotNull(predictions.wasCorrect)))
     .orderBy(desc(predictions.createdAt))
     .limit(windowSize);
   const total = recent.length;

@@ -12,7 +12,7 @@ export async function persistDataUrl(dataUrl: string, id: string): Promise<strin
   const filepath = join(root, filename);
   await writeFile(filepath, Buffer.from(body, "base64"));
   if (publicBase) {
-    return `${publicBase.replace(/\\/$/, "")}/${filename}`;
+    return `${publicBase.replace(/\/$/, "")}/${filename}`;
   }
   return filepath;
 }

@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import { db } from "../db/client.js";
 import { users } from "../db/schema.js";
 import { eq } from "drizzle-orm";
+import { jwtSecret } from "../config.js";
 
 export type AuthedRequest = Request & { userId?: string };
 
@@ -10,7 +11,7 @@ export async function requireAuth(req: AuthedRequest, res: Response, next: NextF
   const auth = req.headers.authorization;
   if (auth?.startsWith("Bearer ")) {
     try {
-      const payload = jwt.verify(auth.replace("Bearer ", ""), process.env.JWT_SECRET ?? "dev-secret") as { sub: string };
+      const payload = jwt.verify(auth.replace("Bearer ", ""), jwtSecret) as { sub: string };
       req.userId = payload.sub;
       next();
       return;
