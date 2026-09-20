@@ -29,7 +29,7 @@ export async function applyRules(clip: ClipInput, deviceName?: string, overrideR
       .where(and(eq(rules.userId, clip.userId), eq(rules.enabled, true)))
       .orderBy(rules.priority));
 
-  let nextClip = { ...clip, tags: clip.tags ?? [] };
+  let nextClip: ClipInput = { ...clip, tags: clip.tags ?? [] };
   const ruleActions: RuleAction[] = [];
   for (const rule of activeRules) {
     if (matches(rule, nextClip)) {

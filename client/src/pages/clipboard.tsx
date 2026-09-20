@@ -365,7 +365,7 @@ export default function ClipboardPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
-  const clipsQuery = useQuery({
+  const clipsQuery = useQuery<{ clips: ClipRecord[] }>({
     queryKey: ["/api/clips", { limit: 200, deleted: "all" }],
   });
 

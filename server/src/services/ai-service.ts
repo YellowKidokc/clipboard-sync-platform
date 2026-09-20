@@ -1,6 +1,5 @@
 import OpenAI from "openai";
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
 type ChatInput = {
@@ -13,13 +12,12 @@ async function chatCompletion({ system, user, json }: ChatInput): Promise<string
   if (!process.env.OPENAI_API_KEY) {
     return `AI disabled: ${user.slice(0, 120)}`;
   }
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const res = await client.responses.create({
     model,
-    input: [
-      ...(system ? [{ role: "system", content: system }] : []),
-      { role: "user", content: user }
-    ],
-    response_format: json ? { type: "json_object" } : undefined
+    instructions: system,
+    input: user,
+    text: json ? { format: { type: "json_object" } } : undefined
   });
   return res.output_text;
 }
@@ -32,12 +30,8 @@ async function aiJson<T>(prompt: string, system?: string, fallback?: T): Promise
   if (!process.env.OPENAI_API_KEY) {
     return fallback as T;
   }
-  try {
-    const text = await chatCompletion({ system, user: prompt, json: true });
-    return JSON.parse(text) as T;
-  } catch {
-    return fallback as T;
-  }
+  const text = await chatCompletion({ system, user: prompt, json: true });
+  return JSON.parse(text) as T;
 }
 
 export async function aiJsonPrediction(

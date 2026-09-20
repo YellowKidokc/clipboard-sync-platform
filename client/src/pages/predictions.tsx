@@ -18,13 +18,21 @@ interface PredictionRecord {
   createdAt: string | Date;
 }
 
+interface PredictionStats {
+  accuracy: number;
+  total: number;
+  correct: number;
+  streak: number;
+  recent_predictions: PredictionRecord[];
+}
+
 export default function PredictionsPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [actualContent, setActualContent] = useState("");
 
-  const currentQuery = useQuery({ queryKey: ["/api/predictions/current"] });
-  const statsQuery = useQuery({ queryKey: ["/api/predictions/stats"] });
+  const currentQuery = useQuery<{ prediction: string; confidence: number }>({ queryKey: ["/api/predictions/current"] });
+  const statsQuery = useQuery<PredictionStats>({ queryKey: ["/api/predictions/stats"] });
 
   const stats = statsQuery.data ?? { accuracy: 0, total: 0, correct: 0, streak: 0, recent_predictions: [] };
   const recent = useMemo(() => (stats.recent_predictions as PredictionRecord[]) ?? [], [stats]);

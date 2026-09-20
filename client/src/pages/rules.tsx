@@ -44,7 +44,7 @@ export default function RulesPage() {
   const [testContent, setTestContent] = useState("");
   const [testResult, setTestResult] = useState<string | null>(null);
 
-  const rulesQuery = useQuery({ queryKey: ["/api/rules"] });
+  const rulesQuery = useQuery<{ rules: RuleRecord[] }>({ queryKey: ["/api/rules"] });
   const rules = useMemo(() => (rulesQuery.data?.rules as RuleRecord[]) ?? [], [rulesQuery.data]);
 
   const createRuleMutation = useMutation({

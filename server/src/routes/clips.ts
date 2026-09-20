@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { asyncHandler } from "../middleware/async-handler.js";
 import { z } from "zod";
 import { and, desc, eq, ilike, lt, sql, type InferSelectModel } from "drizzle-orm";
 import { db } from "../db/client.js";
@@ -58,7 +59,7 @@ async function handleRuleActions(actions: RuleAction[], clip: ClipRow): Promise<
   }
 }
 
-router.post("/", async (req: AuthedRequest, res) => {
+router.post("/", asyncHandler(async (req: AuthedRequest, res) => {
   const input = createClip.parse(req.body);
   const [device] = input.device_id
     ? await db.select().from(devices).where(and(eq(devices.id, input.device_id), eq(devices.userId, req.userId!))).limit(1)
@@ -99,9 +100,9 @@ router.post("/", async (req: AuthedRequest, res) => {
   }
 
   res.status(201).json(clip);
-});
+}));
 
-router.get("/", async (req: AuthedRequest, res) => {
+router.get("/", asyncHandler(async (req: AuthedRequest, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit ?? 50), 1), 200);
   const search = req.query.search ? String(req.query.search) : undefined;
   const folder = req.query.folder ? String(req.query.folder) : undefined;
@@ -109,42 +110,42 @@ router.get("/", async (req: AuthedRequest, res) => {
   const type = req.query.type ? String(req.query.type) : undefined;
   const deletedFilter = req.query.deleted ? String(req.query.deleted) : "false";
 
-  let where = eq(clips.userId, req.userId!);
+  const conditions = [eq(clips.userId, req.userId!)];
   if (deletedFilter === "true") {
-    where = and(where, eq(clips.isDeleted, true));
+    conditions.push(eq(clips.isDeleted, true));
   } else if (deletedFilter !== "all") {
-    where = and(where, eq(clips.isDeleted, false));
+    conditions.push(eq(clips.isDeleted, false));
   }
-  if (search) where = and(where, ilike(clips.textContent, `%${search}%`));
-  if (folder) where = and(where, eq(clips.folderId, folder));
-  if (type) where = and(where, eq(clips.contentType, type));
-  if (tag) where = and(where, sql`${clips.tags} @> ${JSON.stringify([tag])}::jsonb`);
-  if (req.query.before) where = and(where, lt(clips.createdAt, new Date(String(req.query.before))));
+  if (search) conditions.push(ilike(clips.textContent, `%${search}%`));
+  if (folder) conditions.push(eq(clips.folderId, folder));
+  if (type) conditions.push(eq(clips.contentType, type));
+  if (tag) conditions.push(sql`${clips.tags} @> ${JSON.stringify([tag])}::jsonb`);
+  if (req.query.before) conditions.push(lt(clips.createdAt, new Date(String(req.query.before))));
 
-  const rows = await db.select().from(clips).where(where).orderBy(desc(clips.createdAt)).limit(limit);
+  const rows = await db.select().from(clips).where(and(...conditions)).orderBy(desc(clips.createdAt)).limit(limit);
   res.json({ clips: rows });
-});
+}));
 
-router.get("/hotkeys", async (req: AuthedRequest, res) => {
+router.get("/hotkeys", asyncHandler(async (req: AuthedRequest, res) => {
   const rows = await db.select().from(clips).where(and(eq(clips.userId, req.userId!), sql`${clips.hotkeySlot} is not null`));
   const slots = Object.fromEntries(rows.map((c) => [String(c.hotkeySlot), c]));
   res.json({ slots });
-});
+}));
 
-router.post("/hotkeys", async (req: AuthedRequest, res) => {
+router.post("/hotkeys", asyncHandler(async (req: AuthedRequest, res) => {
   const body = z.object({ clip_id: z.string().uuid(), slot: z.number().int().min(1).max(12) }).parse(req.body);
   await db.update(clips).set({ hotkeySlot: null, updatedAt: new Date() }).where(and(eq(clips.userId, req.userId!), eq(clips.hotkeySlot, body.slot)));
   await db.update(clips).set({ hotkeySlot: body.slot, updatedAt: new Date() }).where(and(eq(clips.id, body.clip_id), eq(clips.userId, req.userId!)));
   res.status(204).send();
-});
+}));
 
-router.get("/:id", async (req: AuthedRequest, res) => {
-  const [clip] = await db.select().from(clips).where(and(eq(clips.id, req.params.id), eq(clips.userId, req.userId!))).limit(1);
+router.get("/:id", asyncHandler(async (req: AuthedRequest, res) => {
+  const [clip] = await db.select().from(clips).where(and(eq(clips.id, String(req.params.id)), eq(clips.userId, req.userId!))).limit(1);
   if (!clip) return res.status(404).json({ error: "Not found" });
   res.json(clip);
-});
+}));
 
-router.put("/:id", async (req: AuthedRequest, res) => {
+router.put("/:id", asyncHandler(async (req: AuthedRequest, res) => {
   const patch = z
     .object({
       tags: z.array(z.string()).optional(),
@@ -169,25 +170,26 @@ router.put("/:id", async (req: AuthedRequest, res) => {
   const [updated] = await db
     .update(clips)
     .set(updates)
-    .where(and(eq(clips.id, req.params.id), eq(clips.userId, req.userId!)))
+    .where(and(eq(clips.id, String(req.params.id)), eq(clips.userId, req.userId!)))
     .returning();
+  if (!updated) return res.status(404).json({ error: "Not found" });
   res.json(updated);
-});
+}));
 
-router.delete("/:id", async (req: AuthedRequest, res) => {
+router.delete("/:id", asyncHandler(async (req: AuthedRequest, res) => {
   if (req.query.hard === "true") {
-    await db.delete(clips).where(and(eq(clips.id, req.params.id), eq(clips.userId, req.userId!)));
+    await db.delete(clips).where(and(eq(clips.id, String(req.params.id)), eq(clips.userId, req.userId!)));
   } else {
-    await db.update(clips).set({ isDeleted: true, updatedAt: new Date() }).where(and(eq(clips.id, req.params.id), eq(clips.userId, req.userId!)));
+    await db.update(clips).set({ isDeleted: true, updatedAt: new Date() }).where(and(eq(clips.id, String(req.params.id)), eq(clips.userId, req.userId!)));
   }
   res.status(204).send();
-});
+}));
 
-router.post("/:id/copy", async (req: AuthedRequest, res) => {
-  const [clip] = await db.select().from(clips).where(and(eq(clips.id, req.params.id), eq(clips.userId, req.userId!))).limit(1);
+router.post("/:id/copy", asyncHandler(async (req: AuthedRequest, res) => {
+  const [clip] = await db.select().from(clips).where(and(eq(clips.id, String(req.params.id)), eq(clips.userId, req.userId!))).limit(1);
   if (!clip?.textContent) return res.status(204).send();
   const result = await resolveLatestPrediction(req.userId!, clip.textContent);
   res.json(result);
-});
+}));
 
 export default router;

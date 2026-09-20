@@ -23,11 +23,11 @@ export async function apiRequest(
 }
 
 type UnauthorizedBehavior = "returnNull" | "throw";
-export const getQueryFn: <T>(options: {
+export function getQueryFn<T>(options: {
   on401: UnauthorizedBehavior;
-}) => QueryFunction<T> =
-  ({ on401: unauthorizedBehavior }) =>
-  async ({ queryKey }) => {
+}): QueryFunction<T | null> {
+  const { on401: unauthorizedBehavior } = options;
+  return async ({ queryKey }) => {
     const [path, params] = queryKey as [string, Record<string, unknown> | undefined];
     try {
       const res = await apiFetch(buildUrl(path, params));
@@ -39,6 +39,7 @@ export const getQueryFn: <T>(options: {
       throw error;
     }
   };
+}
 
 export const queryClient = new QueryClient({
   defaultOptions: {

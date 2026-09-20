@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { asyncHandler } from "../middleware/async-handler.js";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/client.js";
@@ -9,25 +10,26 @@ import type { AuthedRequest } from "../middleware/auth.js";
 const router = Router();
 const ruleSchema = z.object({ name: z.string(), match_type: z.enum(["mime", "regex", "contains", "starts_with"]), pattern: z.string(), action: z.enum(["replace", "route_folder", "tag", "webhook", "ai_call"]), params: z.record(z.unknown()).default({}), priority: z.number().int().default(100), enabled: z.boolean().default(true) });
 
-router.get("/", async (req: AuthedRequest, res) => {
+router.get("/", asyncHandler(async (req: AuthedRequest, res) => {
   const data = await db.select().from(rules).where(eq(rules.userId, req.userId!));
   res.json({ rules: data });
-});
-router.post("/", async (req: AuthedRequest, res) => {
+}));
+router.post("/", asyncHandler(async (req: AuthedRequest, res) => {
   const input = ruleSchema.parse(req.body);
   const [row] = await db.insert(rules).values({ userId: req.userId!, name: input.name, matchType: input.match_type, pattern: input.pattern, action: input.action, params: input.params, priority: input.priority, enabled: input.enabled }).returning();
   res.status(201).json(row);
-});
-router.put("/:id", async (req: AuthedRequest, res) => {
+}));
+router.put("/:id", asyncHandler(async (req: AuthedRequest, res) => {
   const input = ruleSchema.partial().parse(req.body);
-  const [row] = await db.update(rules).set({ name: input.name, matchType: input.match_type, pattern: input.pattern, action: input.action, params: input.params, priority: input.priority, enabled: input.enabled }).where(and(eq(rules.id, req.params.id), eq(rules.userId, req.userId!))).returning();
+  const [row] = await db.update(rules).set({ name: input.name, matchType: input.match_type, pattern: input.pattern, action: input.action, params: input.params, priority: input.priority, enabled: input.enabled }).where(and(eq(rules.id, String(req.params.id)), eq(rules.userId, req.userId!))).returning();
+  if (!row) return res.status(404).json({ error: "Not found" });
   res.json(row);
-});
-router.delete("/:id", async (req: AuthedRequest, res) => {
-  await db.delete(rules).where(and(eq(rules.id, req.params.id), eq(rules.userId, req.userId!)));
+}));
+router.delete("/:id", asyncHandler(async (req: AuthedRequest, res) => {
+  await db.delete(rules).where(and(eq(rules.id, String(req.params.id)), eq(rules.userId, req.userId!)));
   res.status(204).send();
-});
-router.post("/test", async (req: AuthedRequest, res) => {
+}));
+router.post("/test", asyncHandler(async (req: AuthedRequest, res) => {
   const body = z.object({ rule: ruleSchema, test_content: z.string(), content_type: z.string().default("text/plain") }).parse(req.body);
   const rule = {
     id: crypto.randomUUID(),
@@ -52,6 +54,6 @@ router.post("/test", async (req: AuthedRequest, res) => {
     (result.tags?.length ?? 0) > 0 ||
     Boolean(result.folderId);
   res.json({ matched, result });
-});
+}));
 
 export default router;
