@@ -1,8 +1,37 @@
-FROM node:20-alpine
-WORKDIR /app
-COPY server/package.json server/package-lock.json* ./
-RUN npm install
-COPY server .
+# Single-image ClipSync: builds the React PWA and the Express API, then ships
+# both in one runtime container. The server serves the built client as static
+# files, so there is one port, one container and one tunnel to expose.
+
+# ---- stage 1: build the React client ----
+FROM node:20-alpine AS client-build
+WORKDIR /build/client
+COPY client/package.json client/package-lock.json ./
+RUN npm ci
+COPY client/ ./
 RUN npm run build
+
+# ---- stage 2: build the Express server ----
+FROM node:20-alpine AS server-build
+WORKDIR /build/server
+COPY server/package.json server/package-lock.json ./
+RUN npm ci
+COPY server/ ./
+RUN npm run build
+
+# ---- stage 3: runtime ----
+FROM node:20-alpine AS runtime
+WORKDIR /app
+
+# Production deps only. NODE_ENV is also what index.ts checks before it
+# mounts the static client, so it has to be set here, not just in compose.
+ENV NODE_ENV=production
+ENV CLIENT_DIST=/app/client-dist
+
+COPY server/package.json server/package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+COPY --from=server-build /build/server/dist ./dist
+COPY --from=client-build /build/client/dist ./client-dist
+
 EXPOSE 5000
-CMD ["npm","run","start"]
+CMD ["node", "dist/index.js"]
