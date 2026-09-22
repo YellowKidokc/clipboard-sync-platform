@@ -1,37 +1,61 @@
+# ClipSync stack. Copy .env.example to .env in this directory first — the
+# stack refuses to start without JWT_SECRET and POSTGRES_PASSWORD set.
+#
+# Host port defaults to 5055, NOT 5000: DSM serves its own web interface on
+# 5000/5001, so binding 5000 on a Synology collides with DSM itself.
+
 services:
   postgres:
     image: postgres:16
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: clipsync
-      POSTGRES_USER: clipsync
-      POSTGRES_PASSWORD: clipsync
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: ${POSTGRES_DB:-clipsync}
+      POSTGRES_USER: ${POSTGRES_USER:-clipsync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Applied automatically on FIRST init only. There is no drizzle/
+      # migrations folder in this repo, so without this the database comes
+      # up with zero tables and every API call fails.
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-clipsync} -d ${POSTGRES_DB:-clipsync}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    # Deliberately not published to the host: the server reaches Postgres
+    # over the compose network. Publishing 5432 exposes it to your whole LAN.
+
   server:
     build:
       context: ..
       dockerfile: infra/Dockerfile.server
+    restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://clipsync:clipsync@postgres:5432/clipsync
-      JWT_SECRET: change-me
+      NODE_ENV: production
       PORT: 5000
+      CLIENT_DIST: /app/client-dist
+      DATABASE_URL: postgresql://${POSTGRES_USER:-clipsync}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-clipsync}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in infra/.env (openssl rand -hex 32)}
       BLOB_STORAGE_PATH: /data/blobs
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      # Empty by default: this container serves the web UI on the same origin
+      # as the API, so no CORS headers are needed.
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      # Webhook rules cannot reach private addresses unless the host is listed
+      # here — see infra/.env.example.
+      WEBHOOK_ALLOWED_HOSTS: ${WEBHOOK_ALLOWED_HOSTS:-}
     ports:
-      - "5000:5000"
+      - "${CLIPSYNC_PORT:-5055}:5000"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     volumes:
+      # Swap for a bind mount on DSM if you want these visible in File Station:
+      #   - /volume1/docker/clipsync/blobs:/data/blobs
       - blobs:/data/blobs
-  client:
-    build:
-      context: ..
-      dockerfile: infra/Dockerfile.client
-    ports:
-      - "4173:4173"
-    depends_on:
-      - server
+
 volumes:
   pgdata:
   blobs:

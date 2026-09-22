@@ -8,6 +8,7 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         project: [client, server]
     defaults:
@@ -22,3 +23,67 @@ jobs:
           cache-dependency-path: ${{ matrix.project }}/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      # Typechecking alone let a broken vite.config.ts through, because the
+      # client tsconfig did not include it and `tsc --noEmit` does not run the
+      # bundler. Building is what proves the thing is shippable.
+      - run: npm run build
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # The runtime image is what actually gets deployed, and it is the only
+      # check that catches a .dockerignore that excludes a needed build input.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/Dockerfile.server
+          push: false
+          load: true
+          tags: clipsync-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # A server that crashes on boot passes every static check. This starts the
+      # real image against a real Postgres and asks it for a response.
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          docker network create clipsync-ci
+          docker run -d --name pg --network clipsync-ci \
+            -e POSTGRES_PASSWORD=ci-password \
+            -e POSTGRES_USER=clipsync \
+            -e POSTGRES_DB=clipsync \
+            -v "$PWD/infra/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro" \
+            postgres:16
+          for _ in $(seq 1 30); do
+            docker exec pg pg_isready -U clipsync -d clipsync && break
+            sleep 2
+          done
+          docker run -d --name server --network clipsync-ci -p 5000:5000 \
+            -e NODE_ENV=production \
+            -e CLIENT_DIST=/app/client-dist \
+            -e DATABASE_URL=postgresql://clipsync:ci-password@pg:5432/clipsync \
+            -e JWT_SECRET=ci-secret-that-is-at-least-32-characters \
+            clipsync-server:ci
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:5000/health && break
+            sleep 2
+          done
+          echo
+          echo "health ok; checking the PWA is served and the API validates input"
+          curl -fsS -o /dev/null -w 'index.html %{http_code}\n' http://127.0.0.1:5000/
+          curl -fsS -o /dev/null -w 'spa fallback %{http_code}\n' http://127.0.0.1:5000/settings
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:5000/api/auth/register \
+            -H 'Content-Type: application/json' -d '{"email":"nope","password":"x"}')" = "400"
+          echo "validation returns 400"
+          # A real round trip through Postgres, which proves schema.sql applied.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:5000/api/auth/register \
+            -H 'Content-Type: application/json' -d '{"email":"ci@example.com","password":"password123"}')" = "201"
+          echo "register returns 201"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:5000/api/auth/register \
+            -H 'Content-Type: application/json' -d '{"email":"ci@example.com","password":"password123"}')" = "409"
+          echo "duplicate email returns 409"
+      - name: Server logs on failure
+        if: failure()
+        run: docker logs server || true

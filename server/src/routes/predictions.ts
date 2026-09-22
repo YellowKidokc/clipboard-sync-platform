@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { asyncHandler } from "../middleware/async-handler.js";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNotNull } from "drizzle-orm";
 import { z } from "zod";
 import type { AuthedRequest } from "../middleware/auth.js";
 import { generatePrediction, resolveLatestPrediction } from "../engine/predictor.js";
@@ -14,6 +14,12 @@ router.get("/current", asyncHandler(async (req: AuthedRequest, res) => {
   res.json({ prediction: prediction.prediction, confidence: prediction.confidence, context_used: prediction.context });
 }));
 
+// Plain-text variant for the AutoHotkey script, which has no JSON parser.
+router.get("/current/text", asyncHandler(async (req: AuthedRequest, res) => {
+  const prediction = await generatePrediction(req.userId!);
+  res.type("text/plain").send(prediction.prediction ?? "");
+}));
+
 router.post("/resolve", asyncHandler(async (req: AuthedRequest, res) => {
   const input = z.object({ actual_content: z.string() }).parse(req.body);
   const result = await resolveLatestPrediction(req.userId!, input.actual_content);
@@ -22,7 +28,14 @@ router.post("/resolve", asyncHandler(async (req: AuthedRequest, res) => {
 
 router.get("/stats", asyncHandler(async (req: AuthedRequest, res) => {
   const [stats] = await db.select().from(predictionStats).where(eq(predictionStats.userId, req.userId!)).limit(1);
-  const recent = await db.select().from(predictions).where(eq(predictions.userId, req.userId!)).orderBy(desc(predictions.createdAt)).limit(20);
+  // Only resolved predictions count: /current always leaves a pending row with
+  // was_correct = NULL at the head of the list, which would zero the streak forever.
+  const recent = await db
+    .select()
+    .from(predictions)
+    .where(and(eq(predictions.userId, req.userId!), isNotNull(predictions.wasCorrect)))
+    .orderBy(desc(predictions.createdAt))
+    .limit(20);
   let streak = 0;
   for (const p of recent) {
     if (p.wasCorrect) streak += 1;

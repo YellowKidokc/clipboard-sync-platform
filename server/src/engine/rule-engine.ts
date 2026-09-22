@@ -2,6 +2,7 @@ import type { InferSelectModel } from "drizzle-orm";
 import { folders, rules } from "../db/schema.js";
 import { db } from "../db/client.js";
 import { and, eq } from "drizzle-orm";
+import { MAX_REGEX_INPUT, compileRulePattern } from "./rule-pattern.js";
 
 type Rule = InferSelectModel<typeof rules>;
 
@@ -18,9 +19,25 @@ export type RuleAction =
   | { type: "webhook"; url: string }
   | { type: "ai_call"; workflow: string };
 
-export type RuleResult = ClipInput & { ruleActions: RuleAction[] };
+export type RuleResult = ClipInput & {
+  ruleActions: RuleAction[];
+  /** Folder a route_folder rule resolved to. Set even in dry-run, where no row is created. */
+  routedFolderPath?: string;
+  /** Rules whose match predicate fired, in priority order. */
+  matchedRuleIds?: string[];
+};
 
-export async function applyRules(clip: ClipInput, deviceName?: string, overrideRules?: Rule[]): Promise<RuleResult> {
+export type RuleEngineOptions = {
+  /** Evaluate rules without writing anything (used by POST /api/rules/test). */
+  dryRun?: boolean;
+};
+
+export async function applyRules(
+  clip: ClipInput,
+  deviceName?: string,
+  overrideRules?: Rule[],
+  options: RuleEngineOptions = {}
+): Promise<RuleResult> {
   const activeRules =
     overrideRules ??
     (await db
@@ -31,22 +48,32 @@ export async function applyRules(clip: ClipInput, deviceName?: string, overrideR
 
   let nextClip: ClipInput = { ...clip, tags: clip.tags ?? [] };
   const ruleActions: RuleAction[] = [];
+  const matchedRuleIds: string[] = [];
+  let routedFolderPath: string | undefined;
   for (const rule of activeRules) {
     if (matches(rule, nextClip)) {
-      const result = await applyAction(rule, nextClip, deviceName);
+      matchedRuleIds.push(rule.id);
+      const result = await applyAction(rule, nextClip, deviceName, options);
       nextClip = result.clip;
       ruleActions.push(...result.actions);
+      if (result.folderPath) routedFolderPath = result.folderPath;
     }
   }
 
-  return { ...nextClip, ruleActions };
+  return { ...nextClip, ruleActions, routedFolderPath, matchedRuleIds };
 }
 
 function matches(rule: Rule, clip: ClipInput): boolean {
   const text = clip.textContent ?? "";
   switch (rule.matchType) {
     case "regex":
-      return new RegExp(rule.pattern, "i").test(text);
+      try {
+        return compileRulePattern(rule.pattern).test(text.slice(0, MAX_REGEX_INPUT));
+      } catch {
+        // A rule stored before validation existed must not throw on every clip
+        // that passes through the engine.
+        return false;
+      }
     case "mime":
       return rule.pattern.endsWith("/*")
         ? clip.contentType.startsWith(rule.pattern.replace("*", ""))
@@ -60,15 +87,21 @@ function matches(rule: Rule, clip: ClipInput): boolean {
   }
 }
 
-export async function applyRule(rule: Rule, clip: ClipInput, deviceName?: string): Promise<RuleResult> {
-  return applyRules(clip, deviceName, [rule]);
+export async function applyRule(
+  rule: Rule,
+  clip: ClipInput,
+  deviceName?: string,
+  options: RuleEngineOptions = {}
+): Promise<RuleResult> {
+  return applyRules(clip, deviceName, [rule], options);
 }
 
 async function applyAction(
   rule: Rule,
   clip: ClipInput,
-  deviceName?: string
-): Promise<{ clip: ClipInput; actions: RuleAction[] }> {
+  deviceName?: string,
+  options: RuleEngineOptions = {}
+): Promise<{ clip: ClipInput; actions: RuleAction[]; folderPath?: string }> {
   switch (rule.action) {
     case "replace": {
       const find = String(rule.params.find ?? "");
@@ -93,14 +126,18 @@ async function applyAction(
         .where(and(eq(folders.userId, clip.userId), eq(folders.pathTemplate, resolved)))
         .limit(1);
       if (folder?.id) {
-        return { clip: { ...clip, folderId: folder.id }, actions: [] };
+        return { clip: { ...clip, folderId: folder.id }, actions: [], folderPath: resolved };
+      }
+      if (options.dryRun) {
+        // Testing a rule must not create folders the user never asked for.
+        return { clip, actions: [], folderPath: resolved };
       }
       const name = resolved.split("/").filter(Boolean).pop() ?? resolved;
       const [created] = await db
         .insert(folders)
         .values({ userId: clip.userId, name, pathTemplate: resolved })
         .returning();
-      return { clip: { ...clip, folderId: created.id }, actions: [] };
+      return { clip: { ...clip, folderId: created.id }, actions: [], folderPath: resolved };
     }
     case "webhook":
       return { clip, actions: [{ type: "webhook", url: String(rule.params.url ?? "") }] };
