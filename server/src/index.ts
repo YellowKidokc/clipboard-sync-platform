@@ -15,6 +15,7 @@ import { db } from "./db/client.js";
 import { devices, users } from "./db/schema.js";
 import { eq } from "drizzle-orm";
 import { asyncHandler } from "./middleware/async-handler.js";
+import { errorHandler } from "./middleware/error-handler.js";
 
 const app = express();
 app.use(cors());
@@ -35,10 +36,6 @@ app.use("/api/folders", requireAuth, foldersRoutes);
 app.use("/api/ai", requireAuth, aiRoutes);
 app.use("/api/predictions", requireAuth, predictionsRoutes);
 
-app.use((error: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  res.status(400).json({ error: error.message });
-});
-
 if (process.env.NODE_ENV === "production") {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const clientDist = process.env.CLIENT_DIST ?? path.resolve(__dirname, "../../client/dist");
@@ -49,6 +46,10 @@ if (process.env.NODE_ENV === "production") {
     });
   }
 }
+
+// Registered last: an error handler mounted above the static/catch-all block
+// never sees errors raised by the routes below it.
+app.use(errorHandler);
 
 const port = Number(process.env.PORT ?? 5000);
 app.listen(port, () => {

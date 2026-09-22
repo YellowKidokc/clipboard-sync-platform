@@ -42,17 +42,20 @@ router.post("/test", asyncHandler(async (req: AuthedRequest, res) => {
     priority: body.rule.priority,
     enabled: body.rule.enabled
   };
-  const result = await applyRule(rule, {
-    userId: req.userId!,
-    contentType: body.content_type,
-    textContent: body.test_content,
-    tags: []
-  });
-  const matched =
-    result.ruleActions.length > 0 ||
-    result.textContent !== body.test_content ||
-    (result.tags?.length ?? 0) > 0 ||
-    Boolean(result.folderId);
+  const result = await applyRule(
+    rule,
+    {
+      userId: req.userId!,
+      contentType: body.content_type,
+      textContent: body.test_content,
+      tags: []
+    },
+    undefined,
+    { dryRun: true }
+  );
+  // The engine reports which rules fired; inferring it from the output missed
+  // no-op transforms and counted a rule that matched but changed nothing as a miss.
+  const matched = (result.matchedRuleIds?.length ?? 0) > 0;
   res.json({ matched, result });
 }));
 
