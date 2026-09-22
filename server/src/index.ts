@@ -16,9 +16,17 @@ import { devices, users } from "./db/schema.js";
 import { eq } from "drizzle-orm";
 import { asyncHandler } from "./middleware/async-handler.js";
 import { errorHandler } from "./middleware/error-handler.js";
+import { corsOrigins } from "./config.js";
 
 const app = express();
-app.use(cors());
+// The production image serves the PWA from this same origin, so no CORS headers
+// are needed by default. `cors()` with no options answered every origin with
+// Access-Control-Allow-Origin: *, which let any website on the internet call
+// this API with a user's API key header. Opt in explicitly for a dev client:
+// CORS_ORIGIN=http://localhost:5173
+if (corsOrigins.length > 0) {
+  app.use(cors({ origin: corsOrigins, credentials: true }));
+}
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));

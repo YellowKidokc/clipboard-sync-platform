@@ -88,7 +88,7 @@ All tables in PostgreSQL. Use Drizzle ORM with `drizzle-kit push` for migrations
 | id | uuid | PK, auto-generated |
 | email | text | unique, required |
 | hashed_password | text | bcrypt hash |
-| api_key | text | optional, for programmatic access |
+| api_key_hash | text | SHA-256 of the key issued by `POST /api/auth/api-key`; the key itself is never stored |
 | created_at | timestamp | default now() |
 
 ### 3.2 `devices`

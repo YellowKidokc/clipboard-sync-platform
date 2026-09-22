@@ -4,7 +4,7 @@ export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: text("email").notNull().unique(),
   hashedPassword: text("hashed_password").notNull(),
-  apiKey: text("api_key"),
+  apiKeyHash: text("api_key_hash").unique(),
   createdAt: timestamp("created_at").defaultNow().notNull()
 });
 

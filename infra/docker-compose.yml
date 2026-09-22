@@ -40,6 +40,12 @@ services:
       BLOB_STORAGE_PATH: /data/blobs
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      # Empty by default: this container serves the web UI on the same origin
+      # as the API, so no CORS headers are needed.
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      # Webhook rules cannot reach private addresses unless the host is listed
+      # here — see infra/.env.example.
+      WEBHOOK_ALLOWED_HOSTS: ${WEBHOOK_ALLOWED_HOSTS:-}
     ports:
       - "${CLIPSYNC_PORT:-5055}:5000"
     depends_on:

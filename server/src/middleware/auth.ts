@@ -4,6 +4,7 @@ import { db } from "../db/client.js";
 import { users } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import { jwtSecret } from "../config.js";
+import { hashApiKey } from "../services/api-key.js";
 
 export type AuthedRequest = Request & { userId?: string };
 
@@ -24,7 +25,13 @@ export async function requireAuth(req: AuthedRequest, res: Response, next: NextF
   const apiKeyHeader = req.headers["x-api-key"] ?? (auth?.startsWith("ApiKey ") ? auth.replace("ApiKey ", "") : undefined);
   if (apiKeyHeader) {
     const apiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
-    const [user] = await db.select({ id: users.id }).from(users).where(eq(users.apiKey, apiKey)).limit(1);
+    // The column stores a SHA-256 digest, never the key itself, so a database
+    // dump does not hand out working credentials.
+    const [user] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.apiKeyHash, hashApiKey(apiKey)))
+      .limit(1);
     if (user?.id) {
       req.userId = user.id;
       next();

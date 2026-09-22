@@ -2,6 +2,7 @@ import type { InferSelectModel } from "drizzle-orm";
 import { folders, rules } from "../db/schema.js";
 import { db } from "../db/client.js";
 import { and, eq } from "drizzle-orm";
+import { MAX_REGEX_INPUT, compileRulePattern } from "./rule-pattern.js";
 
 type Rule = InferSelectModel<typeof rules>;
 
@@ -66,7 +67,13 @@ function matches(rule: Rule, clip: ClipInput): boolean {
   const text = clip.textContent ?? "";
   switch (rule.matchType) {
     case "regex":
-      return new RegExp(rule.pattern, "i").test(text);
+      try {
+        return compileRulePattern(rule.pattern).test(text.slice(0, MAX_REGEX_INPUT));
+      } catch {
+        // A rule stored before validation existed must not throw on every clip
+        // that passes through the engine.
+        return false;
+      }
     case "mime":
       return rule.pattern.endsWith("/*")
         ? clip.contentType.startsWith(rule.pattern.replace("*", ""))

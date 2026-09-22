@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   email text NOT NULL UNIQUE,
   hashed_password text NOT NULL,
-  api_key text,
+  api_key_hash text UNIQUE,
   created_at timestamp NOT NULL DEFAULT now()
 );
 
@@ -83,3 +83,9 @@ CREATE TABLE IF NOT EXISTS ai_conversations (
   workflow text,
   created_at timestamp NOT NULL DEFAULT now()
 );
+
+-- Upgrading a database created before API keys were hashed? The old api_key
+-- column stored plaintext and no endpoint ever issued a key into it, so
+-- nothing is lost by running:
+--   ALTER TABLE users DROP COLUMN IF EXISTS api_key;
+--   ALTER TABLE users ADD COLUMN IF NOT EXISTS api_key_hash text UNIQUE;

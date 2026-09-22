@@ -6,6 +6,7 @@ import { db } from "../db/client.js";
 import { aiConversations, clips, devices } from "../db/schema.js";
 import { applyRules, type RuleAction } from "../engine/rule-engine.js";
 import { persistDataUrl } from "../services/blob-storage.js";
+import { sendWebhook } from "../services/webhook.js";
 import { runWorkflow, suggestTags } from "../services/ai-service.js";
 import { resolveLatestPrediction } from "../engine/predictor.js";
 import type { AuthedRequest } from "../middleware/auth.js";
@@ -28,11 +29,9 @@ type ClipRow = InferSelectModel<typeof clips>;
 async function handleRuleActions(actions: RuleAction[], clip: ClipRow): Promise<void> {
   for (const action of actions) {
     if (action.type === "webhook" && action.url) {
-      fetch(action.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clip })
-      }).catch(() => undefined);
+      // Deliberately not awaited: clip creation must not block on a webhook.
+      // sendWebhook re-validates the target and swallows its own failures.
+      void sendWebhook(action.url, { clip });
     }
     if (action.type === "ai_call" && clip.textContent) {
       if (action.workflow === "summarize") {
