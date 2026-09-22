@@ -1,92 +1,185 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 
-base := "http://localhost:5000"
-; Optional: set your JWT token here if auth is enabled
-apiToken := ""
+; ClipSync hotkeys
+;
+; Ctrl+Alt+1..0, -, =   paste the clip in hotkey slot 1..12
+; Ctrl+Alt+S            save the current clipboard into the next free slot
+; Ctrl+Alt+P            show the current prediction
+; Ctrl+Alt+Space        open the ClipSync web UI
+; Ctrl+Alt+Q            pause/resume clipboard capture
+;
+; Setup:
+;   1. Point BASE_URL at your server. On a Synology the stack publishes 5055,
+;      not 5000 -- DSM owns 5000/5001.
+;   2. Get an API key:  POST /api/auth/api-key  with your login token.
+;      Put it in API_KEY below, or set a CLIPSYNC_API_KEY environment variable
+;      so the key is not sitting in a file.
+;
+; Every endpoint this script calls returns text/plain, so there is no JSON
+; parsing here at all.
 
-HttpRequest(method, url, body := "") {
-    global apiToken
-    req := ComObject("WinHttp.WinHttpRequest.5.1")
-    req.Open(method, url, false)
-    if (body != "") {
-        req.SetRequestHeader("Content-Type", "application/json")
+BASE_URL := "http://192.168.1.177:5055"
+API_KEY := EnvGet("CLIPSYNC_API_KEY")
+
+; Set to false to stop sending every copy to the server. Ctrl+Alt+Q toggles it.
+captureEnabled := true
+
+; Raised while the script writes to the clipboard itself. Without it, pasting a
+; slot fires OnClipboardChange, which POSTs the clip straight back to the
+; server and creates a duplicate on every paste.
+suppressCapture := false
+
+if (API_KEY = "") {
+    MsgBox "ClipSync: no API key.`n`nSet CLIPSYNC_API_KEY in your environment, or edit API_KEY in " A_ScriptName ".`n`nGet a key with: POST " BASE_URL "/api/auth/api-key", "ClipSync", "Iconx"
+    ExitApp
+}
+
+; --- HTTP ---------------------------------------------------------------
+
+/**
+ * Returns a Map with "status" and "text". Never throws: a hotkey that raises
+ * an uncaught error in AutoHotkey pops a dialog over whatever you were doing.
+ */
+Http(method, path, body := "") {
+    global BASE_URL, API_KEY
+    result := Map("status", 0, "text", "")
+    try {
+        req := ComObject("WinHttp.WinHttpRequest.5.1")
+        req.Open(method, BASE_URL path, false)
+        req.SetTimeouts(5000, 5000, 5000, 15000)
+        req.SetRequestHeader("X-API-Key", API_KEY)
+        if (body != "") {
+            req.SetRequestHeader("Content-Type", "text/plain; charset=utf-8")
+        }
+        req.Send(body)
+        result["status"] := req.Status
+        result["text"] := req.ResponseText
+    } catch as err {
+        result["status"] := 0
+        result["text"] := err.Message
     }
-    if (apiToken != "") {
-        req.SetRequestHeader("Authorization", "Bearer " apiToken)
+    return result
+}
+
+Toast(message, duration := 1200) {
+    ToolTip message
+    SetTimer(() => ToolTip(), -duration)
+}
+
+/** Reports a failed call in a way that says which one failed and why. */
+ToastFailure(what, result) {
+    global BASE_URL
+    if (result["status"] = 0) {
+        Toast "ClipSync: cannot reach " BASE_URL, 2500
+    } else if (result["status"] = 401) {
+        Toast "ClipSync: API key rejected (401)", 2500
+    } else {
+        Toast "ClipSync: " what " failed (" result["status"] ") " SubStr(result["text"], 1, 80), 2500
     }
-    req.Send(body)
-    return req.ResponseText
 }
 
-HttpGet(url) {
-    return HttpRequest("GET", url)
+/** Writes to the clipboard without the write coming back as a new clip. */
+SetClipboardQuietly(textValue) {
+    global suppressCapture
+    suppressCapture := true
+    A_Clipboard := textValue
+    ; OnClipboardChange is delivered asynchronously, so the flag has to outlive
+    ; this function by long enough for the notification to arrive.
+    SetTimer(() => ReleaseCaptureSuppression(), -500)
 }
 
-HttpPost(url, body) {
-    return HttpRequest("POST", url, body)
+ReleaseCaptureSuppression() {
+    global suppressCapture
+    suppressCapture := false
 }
+
+; --- Actions ------------------------------------------------------------
 
 PasteSlot(slot) {
-    global base
-    response := HttpGet(base "/api/clips/hotkeys")
-    data := Jxon_Load(&response)
-    clip := data["slots"][String(slot)]
-    if IsObject(clip) {
-        A_Clipboard := clip["textContent"]
-        Send "^v"
+    result := Http("GET", "/api/clips/hotkeys/" slot "/text")
+    if (result["status"] = 404) {
+        Toast "Slot " slot " is empty"
+        return
     }
+    if (result["status"] != 200) {
+        ToastFailure("slot " slot, result)
+        return
+    }
+    SetClipboardQuietly(result["text"])
+    ; Give Windows a moment to publish the new clipboard contents before the
+    ; target application is told to read them.
+    Sleep 60
+    Send "^v"
 }
 
 SaveToNextSlot() {
-    global base
-    response := HttpGet(base "/api/clips/hotkeys")
-    data := Jxon_Load(&response)
-    slots := data["slots"]
-    nextSlot := 0
-    Loop 12 {
-        if !slots.Has(String(A_Index)) {
-            nextSlot := A_Index
-            break
-        }
-    }
-    if (nextSlot = 0) {
-        ToolTip "No empty hotkey slots"
-        SetTimer () => ToolTip(), -1200
+    if (A_Clipboard = "") {
+        Toast "Clipboard is empty"
         return
     }
-
-    payload := Jxon_Dump({ content_type: "text/plain", text_content: A_Clipboard, source: "clipboard_monitor" })
-    created := HttpPost(base "/api/clips", payload)
-    clip := Jxon_Load(&created)
-    if IsObject(clip) {
-        HttpPost(base "/api/clips/hotkeys", Jxon_Dump({ clip_id: clip["id"], slot: nextSlot }))
-        ToolTip "Saved to slot " nextSlot
-        SetTimer () => ToolTip(), -1200
+    result := Http("POST", "/api/clips/hotkeys/next", A_Clipboard)
+    if (result["status"] = 409) {
+        Toast "All 12 hotkey slots are full", 2000
+        return
     }
+    if (result["status"] != 200) {
+        ToastFailure("save", result)
+        return
+    }
+    Toast "Saved to slot " result["text"]
 }
 
 ShowPrediction() {
-    global base
-    response := HttpGet(base "/api/predictions/current")
-    data := Jxon_Load(&response)
-    ToolTip "Prediction: " data["prediction"]
-    SetTimer () => ToolTip(), -1500
+    result := Http("GET", "/api/predictions/current/text")
+    if (result["status"] != 200) {
+        ToastFailure("prediction", result)
+        return
+    }
+    if (result["text"] = "") {
+        Toast "No prediction yet"
+        return
+    }
+    Toast "Prediction: " result["text"], 2500
 }
+
+OpenWebUi() {
+    global BASE_URL
+    Run BASE_URL
+}
+
+ToggleCapture() {
+    global captureEnabled
+    captureEnabled := !captureEnabled
+    Toast(captureEnabled ? "ClipSync capture ON" : "ClipSync capture OFF")
+}
+
+; --- Clipboard capture --------------------------------------------------
 
 OnClipboardChange ClipChanged
 
-ClipChanged(type) {
-    global base
-    if (type != 1)
+ClipChanged(dataType) {
+    global captureEnabled, suppressCapture
+    if (dataType != 1)          ; 1 = text; images are not handled here
+        return
+    if (!captureEnabled)
+        return
+    if (suppressCapture)        ; this script wrote the clipboard, not the user
         return
     if (A_Clipboard = "")
         return
-    payload := Jxon_Dump({ content_type: "text/plain", text_content: A_Clipboard, source: "clipboard_monitor" })
-    HttpPost(base "/api/clips", payload)
-    ToolTip "ClipSync saved"
-    SetTimer () => ToolTip(), -800
+    ; /api/clips/text stores the clip without assigning a hotkey slot. Posting
+    ; to /hotkeys/next here would burn all twelve slots within a minute of
+    ; normal copying.
+    result := Http("POST", "/api/clips/text", A_Clipboard)
+    if (result["status"] = 201) {
+        Toast "ClipSync saved", 800
+    } else {
+        ToastFailure("capture", result)
+    }
 }
+
+; --- Hotkeys ------------------------------------------------------------
 
 ^!1::PasteSlot(1)
 ^!2::PasteSlot(2)
@@ -103,168 +196,5 @@ ClipChanged(type) {
 
 ^!s::SaveToNextSlot()
 ^!p::ShowPrediction()
-^!Space::Run "http://localhost:5000"
-
-; --- Jxon JSON helpers (trimmed for AHK v2) ---
-; Source: https://github.com/cocobelgica/AutoHotkey-JSON
-
-Jxon_Load(&src, args*) {
-    static q := Chr(34)
-    static json := { true: true, false: false, null: "" }
-    pos := 1
-    return __Jxon_Value(src, pos)
-}
-
-__Jxon_Value(ByRef src, ByRef pos) {
-    static q := Chr(34)
-    __Jxon_Skip(src, pos)
-    ch := SubStr(src, pos, 1)
-    if (ch = q)
-        return __Jxon_String(src, pos)
-    if (ch = "{")
-        return __Jxon_Object(src, pos)
-    if (ch = "[")
-        return __Jxon_Array(src, pos)
-    return __Jxon_Primitive(src, pos)
-}
-
-__Jxon_Object(ByRef src, ByRef pos) {
-    obj := Map()
-    pos++
-    loop {
-        __Jxon_Skip(src, pos)
-        if (SubStr(src, pos, 1) = "}") {
-            pos++
-            break
-        }
-        key := __Jxon_String(src, pos)
-        __Jxon_Skip(src, pos)
-        pos++
-        value := __Jxon_Value(src, pos)
-        obj[key] := value
-        __Jxon_Skip(src, pos)
-        ch := SubStr(src, pos, 1)
-        if (ch = ",") {
-            pos++
-            continue
-        }
-        if (ch = "}") {
-            pos++
-            break
-        }
-    }
-    return obj
-}
-
-__Jxon_Array(ByRef src, ByRef pos) {
-    arr := []
-    pos++
-    loop {
-        __Jxon_Skip(src, pos)
-        if (SubStr(src, pos, 1) = "]") {
-            pos++
-            break
-        }
-        arr.Push(__Jxon_Value(src, pos))
-        __Jxon_Skip(src, pos)
-        ch := SubStr(src, pos, 1)
-        if (ch = ",") {
-            pos++
-            continue
-        }
-        if (ch = "]") {
-            pos++
-            break
-        }
-    }
-    return arr
-}
-
-__Jxon_String(ByRef src, ByRef pos) {
-    static q := Chr(34)
-    pos++
-    out := ""
-    loop {
-        ch := SubStr(src, pos, 1)
-        if (ch = q) {
-            pos++
-            break
-        }
-        if (ch = "\\") {
-            pos++
-            esc := SubStr(src, pos, 1)
-            if (esc = "u") {
-                hex := SubStr(src, pos + 1, 4)
-                out .= Chr("0x" hex)
-                pos += 5
-                continue
-            }
-            map := Map("\"", q, "\\", "\\", "/", "/", "b", "`b", "f", "`f", "n", "`n", "r", "`r", "t", "`t")
-            out .= map.Has(esc) ? map[esc] : esc
-            pos++
-            continue
-        }
-        out .= ch
-        pos++
-    }
-    return out
-}
-
-__Jxon_Primitive(ByRef src, ByRef pos) {
-    match := RegExMatch(SubStr(src, pos), "^(true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", &m)
-    if (!match)
-        return ""
-    pos += StrLen(m[1])
-    if (m[1] = "true")
-        return true
-    if (m[1] = "false")
-        return false
-    if (m[1] = "null")
-        return ""
-    return m[1] + 0
-}
-
-__Jxon_Skip(ByRef src, ByRef pos) {
-    while (pos <= StrLen(src) && InStr(" `t`r`n", SubStr(src, pos, 1)))
-        pos++
-}
-
-Jxon_Dump(obj) {
-    if IsObject(obj) {
-        if obj is Array {
-            out := "["
-            for index, val in obj
-                out .= (index > 1 ? "," : "") Jxon_Dump(val)
-            return out "]"
-        }
-        out := "{"
-        first := true
-        for key, val in obj {
-            if (!first)
-                out .= ","
-            first := false
-            out .= "\"" __Jxon_Escape(key) "\":" Jxon_Dump(val)
-        }
-        return out "}"
-    }
-    if (obj = true)
-        return "true"
-    if (obj = false)
-        return "false"
-    if (obj = "")
-        return "null"
-    if obj is Number
-        return obj
-    return "\"" __Jxon_Escape(obj) "\""
-}
-
-__Jxon_Escape(str) {
-    str := StrReplace(str, "\\", "\\\\")
-    str := StrReplace(str, "\"", "\\\"")
-    str := StrReplace(str, "`b", "\\b")
-    str := StrReplace(str, "`f", "\\f")
-    str := StrReplace(str, "`n", "\\n")
-    str := StrReplace(str, "`r", "\\r")
-    str := StrReplace(str, "`t", "\\t")
-    return str
-}
+^!q::ToggleCapture()
+^!Space::OpenWebUi()

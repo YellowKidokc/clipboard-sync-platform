@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, text as textBody } from "express";
 import { asyncHandler } from "../middleware/async-handler.js";
 import { z } from "zod";
 import { and, desc, eq, ilike, lt, sql, type InferSelectModel } from "drizzle-orm";
@@ -136,6 +136,85 @@ router.post("/hotkeys", asyncHandler(async (req: AuthedRequest, res) => {
   await db.update(clips).set({ hotkeySlot: null, updatedAt: new Date() }).where(and(eq(clips.userId, req.userId!), eq(clips.hotkeySlot, body.slot)));
   await db.update(clips).set({ hotkeySlot: body.slot, updatedAt: new Date() }).where(and(eq(clips.id, body.clip_id), eq(clips.userId, req.userId!)));
   res.status(204).send();
+}));
+
+// --- Plain-text endpoints for the AutoHotkey script ---
+// AutoHotkey v2 has no JSON parser in the standard library. Shipping one in the
+// script meant several hundred lines of parser to maintain for three calls, so
+// the three things the script needs are exposed as text/plain instead.
+
+router.get("/hotkeys/:slot/text", asyncHandler(async (req: AuthedRequest, res) => {
+  const slot = Number(req.params.slot);
+  if (!Number.isInteger(slot) || slot < 1 || slot > 12) {
+    return res.status(400).type("text/plain").send("Slot must be between 1 and 12");
+  }
+  const [clip] = await db
+    .select({ textContent: clips.textContent })
+    .from(clips)
+    .where(and(eq(clips.userId, req.userId!), eq(clips.hotkeySlot, slot)))
+    .limit(1);
+  if (!clip?.textContent) {
+    return res.status(404).type("text/plain").send("");
+  }
+  res.type("text/plain").send(clip.textContent);
+}));
+
+// Body is the raw clipboard text. Stores it without touching hotkey slots --
+// this is what the clipboard monitor calls on every copy.
+router.post("/text", textBody({ type: "text/plain", limit: "1mb" }), asyncHandler(async (req: AuthedRequest, res) => {
+  const content = typeof req.body === "string" ? req.body : "";
+  if (content.trim() === "") {
+    return res.status(400).type("text/plain").send("Request body is empty");
+  }
+  const transformed = await applyRules({
+    userId: req.userId!,
+    contentType: "text/plain",
+    textContent: content,
+    tags: [],
+    source: "clipboard_monitor"
+  });
+  const [clip] = await db
+    .insert(clips)
+    .values({
+      userId: req.userId!,
+      contentType: transformed.contentType,
+      textContent: transformed.textContent,
+      tags: transformed.tags ?? [],
+      folderId: transformed.folderId,
+      source: "clipboard_monitor"
+    })
+    .returning();
+  await handleRuleActions(transformed.ruleActions, clip);
+  if (clip.textContent) {
+    await resolveLatestPrediction(req.userId!, clip.textContent);
+  }
+  res.status(201).type("text/plain").send("saved");
+}));
+
+// Body is the raw clipboard text. Responds with the slot number it landed in,
+// so the script does one call instead of list -> create -> assign.
+router.post("/hotkeys/next", textBody({ type: "text/plain", limit: "1mb" }), asyncHandler(async (req: AuthedRequest, res) => {
+  const content = typeof req.body === "string" ? req.body : "";
+  if (content.trim() === "") {
+    return res.status(400).type("text/plain").send("Request body is empty");
+  }
+  const used = await db
+    .select({ slot: clips.hotkeySlot })
+    .from(clips)
+    .where(and(eq(clips.userId, req.userId!), sql`${clips.hotkeySlot} is not null`));
+  const taken = new Set(used.map((row) => row.slot));
+  const slot = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].find((candidate) => !taken.has(candidate));
+  if (!slot) {
+    return res.status(409).type("text/plain").send("All 12 hotkey slots are full");
+  }
+  await db.insert(clips).values({
+    userId: req.userId!,
+    contentType: "text/plain",
+    textContent: content,
+    source: "hotkey",
+    hotkeySlot: slot
+  });
+  res.type("text/plain").send(String(slot));
 }));
 
 router.get("/:id", asyncHandler(async (req: AuthedRequest, res) => {

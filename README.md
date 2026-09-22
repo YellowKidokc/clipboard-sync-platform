@@ -179,6 +179,9 @@ All tables in PostgreSQL. Use Drizzle ORM with `drizzle-kit push` for migrations
 ```
 POST /api/auth/register    { email, password } → { user, token }
 POST /api/auth/login       { email, password } → { token }
+POST /api/auth/api-key     (authenticated) → { api_key }  shown once, only a
+                           SHA-256 digest is stored. Use it as X-API-Key.
+DELETE /api/auth/api-key   (authenticated) Revoke the current key
 GET  /api/me               → { user, devices }
 ```
 
@@ -202,6 +205,16 @@ GET  /api/clips/hotkeys     Get clips assigned to hotkey slots 1-12
 
 POST /api/clips/hotkeys     Assign a clip to a hotkey slot
   Body: { clip_id, slot: 1-12 }
+```
+
+Plain-text variants, for clients without a JSON parser (the AutoHotkey script):
+```
+POST /api/clips/text              Body: raw text. Stores a clip, no hotkey slot.
+                                  → 201 "saved"
+POST /api/clips/hotkeys/next      Body: raw text. Stores it in the lowest free
+                                  slot. → 200 "<slot>", or 409 when all 12 are full
+GET  /api/clips/hotkeys/:slot/text  → 200 the slot's text, or 404 when empty
+GET  /api/predictions/current/text  → 200 the prediction as plain text
 ```
 
 ### 4.3 Rules
@@ -349,29 +362,31 @@ AutoHotKey v2 script that runs at startup:
 | `Ctrl+Alt+S` | Save current clipboard to next available slot |
 | `Ctrl+Alt+P` | Show current AI prediction (tooltip) |
 | `Ctrl+Alt+Space` | Open ClipSync in browser |
+| `Ctrl+Alt+Q` | Pause / resume clipboard capture |
 
 ### 7.2 How AHK Talks to the Server
-The AHK script communicates with the local Express server via HTTP:
+AutoHotkey v2 has no JSON parser in its standard library, so the script uses the
+plain-text endpoints listed in section 4.2 and does no parsing at all.
+
+Authentication is an API key, not a JWT: keys do not expire, so the script does
+not need a login flow. Issue one with `POST /api/auth/api-key` and put it in
+the `CLIPSYNC_API_KEY` environment variable, or edit `API_KEY` at the top of
+`desktop/clipsync-hotkeys.ahk`. Set `BASE_URL` to your server — on a Synology
+that is port 5055, not 5000, because DSM owns 5000/5001.
 
 ```autohotkey
-; Example: Paste from slot 3
-^!3:: {
-    response := HttpGet("http://localhost:5000/api/clips/hotkeys")
-    clip := JSON.Parse(response).slots["3"]
-    A_Clipboard := clip.text_content
+; Paste from slot 3: one request, response body is the text itself
+result := Http("GET", "/api/clips/hotkeys/3/text")
+if (result["status"] = 200) {
+    SetClipboardQuietly(result["text"])   ; suppressed so the paste is not re-captured
     Send "^v"
 }
 
-; Example: Save current clipboard to server
-^!s:: {
-    content := A_Clipboard
-    HttpPost("http://localhost:5000/api/clips", {
-        content_type: "text/plain",
-        text_content: content,
-        source: "clipboard_monitor"
-    })
-}
+; Save the clipboard to the next free slot: one request, response is the slot number
+result := Http("POST", "/api/clips/hotkeys/next", A_Clipboard)
 ```
+
+`Ctrl+Alt+Q` pauses and resumes clipboard capture.
 
 ### 7.3 Clipboard Monitoring
 AHK monitors the system clipboard via `OnClipboardChange`. On every copy:

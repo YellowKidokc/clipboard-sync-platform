@@ -14,6 +14,12 @@ router.get("/current", asyncHandler(async (req: AuthedRequest, res) => {
   res.json({ prediction: prediction.prediction, confidence: prediction.confidence, context_used: prediction.context });
 }));
 
+// Plain-text variant for the AutoHotkey script, which has no JSON parser.
+router.get("/current/text", asyncHandler(async (req: AuthedRequest, res) => {
+  const prediction = await generatePrediction(req.userId!);
+  res.type("text/plain").send(prediction.prediction ?? "");
+}));
+
 router.post("/resolve", asyncHandler(async (req: AuthedRequest, res) => {
   const input = z.object({ actual_content: z.string() }).parse(req.body);
   const result = await resolveLatestPrediction(req.userId!, input.actual_content);
